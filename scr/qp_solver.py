@@ -3,6 +3,17 @@ import numpy as np
 from scr.base_kernel import Kernel
 
 
+class NH:
+    def __init__(self, a: float, b: float):
+        self.a = a
+        self.b = b
+
+    def __contains__(self, num: float):
+        if num > self.a and num < self.b:
+            return True
+        return False
+
+
 class SMO_QPSolver:
     """
     This class represents a Sequential Minimal Optimization (SMO) algorithm for solving the quadratic
@@ -47,7 +58,9 @@ class SMO_QPSolver:
                 f"y must be the same length as X, but {X.shape=} and {y.size=}"
             )
 
-        self.errors = np.zeros(self.n_samples)
+        self.errors = np.array([-10000000 for _ in range(self.n_samples)])
+
+        print(self.X, self.y)
 
     def solve(self, alpha: np.ndarray, b: float):
         if alpha.size != self.n_samples:
@@ -56,73 +69,103 @@ class SMO_QPSolver:
             )
         iteration = 0
         while iteration < self.max_iter:
+            prev_js = []
+            prev_is = []
             # 1. Выбор первого множителя (нарушителя KKT)
             i = self.select_first_multiplier(alpha, b)
             if i is None:
                 break  # Все примеры удовлетворяют KKT
-                
+            if self.errors[i] != -10000000:
+                E1 = self.errors[i]
+            else: 
+                E1 = self.compute_error(self.X[i], self.y[i], alpha, b)
+            r = E1 * self.y[i]
+            if  not ((r < -self.tol and alpha[i] < self.C) or (r > self.tol and alpha[i] > 0)):
+                continue
             # 2. Выбор второго множителя
             j = self.select_second_multiplier(i, alpha, b)
-            
+
             if j is None:
                 continue
-                
+
             # 3. Совместная оптимизация alpha[i] и alpha[j]
-            self.take_step(i, j, alpha, b)
-            
+            while True:
+                prev_js.append(j)
+
+                j = self.select_second_multiplier(i, alpha, b, prev_js)
+                if j is None:
+                    break
+                if self.take_step(i, j, alpha, b):
+                    break
+
             # 4. Обновление кэша ошибок
-            self.update_errors(alpha, b)
+            self.errors[i] = self.compute_error(self.X[i], self.y[i], alpha, b)
+            self.errors[j] = self.compute_error(self.X[j], self.y[j], alpha, b)
+
             print(iteration)
             iteration += 1
 
-    def select_first_multiplier(self, alpha, b):
-        # Сначала проверяем неграничные примеры (0 < alpha < C)
-        non_bound = np.where((alpha > self.tol) & (alpha < self.C - self.tol))[0]
+    def select_first_multiplier(self, alpha, b, prev_is=None):
+        non_bound = np.where(
+            ((alpha > self.tol) | (alpha > 0))
+            & ((alpha < self.C - self.tol) | (alpha < self.C))
+        )[0]
         for i in non_bound:
             if self.violates_KKT(self.X[i], self.y[i], alpha[i], alpha, b):
                 return i
-        
-        # Затем весь набор данных
-        for i in range(self.n_samples):
+        left = np.where(
+            ((alpha <= self.tol) & (alpha >= -self.tol))
+            & ((alpha >= self.C - self.tol) | (alpha <= self.C + self.tol))
+        )[0]
+
+        for i in left:
             if self.violates_KKT(self.X[i], self.y[i], alpha[i], alpha, b):
                 return i
         return None
-    
 
-    def select_second_multiplier(self, i, alpha, b):
+    def select_second_multiplier(self, i, alpha, b, prev_js=None):
         max_delta = 0
         j = -1
-        
-        # Стратегия 1: выбор через максимальную |Ei - Ej|
-        self.errors[i] = self.compute_error(self.X[i], self.y[i], alpha, b)
-        Ei = self.errors[i]
-        if Ei >= 0:
-            candidates = np.where(self.errors == np.min(self.errors))[0]
+        candidates = []
+        if self.errors[i] != -10000000:
+            Ei = self.errors[i]
         else:
-            candidates = np.where(self.errors == np.max(self.errors))[0]
-        
-        # Ищем допустимый j с максимальным шагом
+            Ei = self.compute_error(self.X[i], self.y[i], alpha, b)
+        if np.min(self.errors) != np.max(self.errors):
+            if Ei >= 0:
+                candidates = np.where(self.errors == np.min(self.errors))[0]
+            else:
+                candidates = np.where(self.errors == np.max(self.errors))[0]
+
         for candidate in candidates:
-            if candidate == i:
+            if candidate == i or (prev_js is not None and candidate in prev_js):
                 continue
-            if self.is_valid_pair(i, candidate, alpha):
-                delta = abs(Ei - self.errors[candidate])
-                if delta > max_delta:
-                    max_delta = delta
-                    j = candidate
-                    
+            delta = abs(Ei - self.errors[candidate])
+            if delta > max_delta:
+                max_delta = delta
+                j = candidate
+
         if j != -1:
             return j
+
+        non_bound = np.where(
+            ((alpha > self.tol) | (alpha > 0))
+            & ((alpha < self.C - self.tol) | (alpha < self.C))
+        )[0]
         
-        # Стратегия 2: резервный поиск
+        random_indices = np.random.permutation(non_bound)
+        for idx in random_indices:
+            if idx == i or (prev_js is not None and idx in prev_js):
+                continue
+            return idx
+        
         random_indices = np.random.permutation(self.n_samples)
         for idx in random_indices:
-            if idx == i:
+            if idx == i or (prev_js is not None and idx in prev_js):
                 continue
-            if self.is_valid_pair(i, idx, alpha):
-                return idx
+            return idx
         return None
-    
+
     def take_step(self, i1, i2, alpha, b):
         if i1 == i2:
             return 0
@@ -130,18 +173,16 @@ class SMO_QPSolver:
         y1 = self.y[i1]
         alph2 = alpha[i2]
         y2 = self.y[i2]
-        if self.errors[i1] !=0:
+        if self.errors[i1] != -10000000:
             E1 = self.errors[i1]
         else:
             E1 = self.compute_error(self.X[i1], y1, alpha, b)
-            self.errors[i1] = E1
-        
-        if self.errors[i2] !=0:
+
+        if self.errors[i2] != -10000000:
             E2 = self.errors[i2]
         else:
             E2 = self.compute_error(self.X[i2], y2, alpha, b)
-            self.errors[i2] = E2
-            
+
         s = y1 * y2
         L = max(0, alph2 - alph1) if y1 != y2 else max(0, alph2 + alph1 - self.C)
         H = (
@@ -165,8 +206,8 @@ class SMO_QPSolver:
                 a2 = H
 
         else:
-            Lobj = self.output(L)
-            Hobj = self.output(H)
+            Lobj = self.output(L, alpha, b)
+            Hobj = self.output(H, alpha, b)
             if Lobj < Hobj - self.tol:
                 a2 = L
             elif Lobj > Hobj + self.tol:
@@ -179,15 +220,12 @@ class SMO_QPSolver:
         a1 = alph1 + s * (alph2 - a2)
 
         b1 = E1 + y1 * (a1 - alpha[i1]) * k11 + y2 * (a2 - alpha[i2]) * k12 + b
-        b2 = (
-            E2
-            + y1 * (a1 - alpha[i1]) * k12
-            + y2 * (a2 - alpha[i2]) * k22
-            + b
-        )
+        b2 = E2 + y1 * (a1 - alpha[i1]) * k12 + y2 * (a2 - alpha[i2]) * k22 + b
         b = (b1 + b2) / 2
         alpha[i2] = a2
         alpha[i1] = a1
+        print(i1, i2)
+
         return 1
 
     def output(self, x_sample: np.ndarray, alpha, b):
@@ -202,16 +240,13 @@ class SMO_QPSolver:
 
     def compute_error(self, x, y, alpha, b):
         return self.output(x, alpha, b) - y
-        
-    def is_valid_pair(self, i, j, alpha):
-        # Проверка допустимости пары (например, разные классы)
-        return self.y[i] != self.y[j] or (alpha[i] > 0 and alpha[j] < self.C)
-    
+
     def violates_KKT(self, x, y, alpha_, alpha, b):
-        # Проверка условий KKT с допуском tol
         y_pred = self.output(x, alpha, b)
-        if (alpha_ < self.C - self.tol) and (y * y_pred < 1 - self.tol):
+        if (alpha_ in NH(self.C - self.tol, self.C + self.tol)) and (
+            y * y_pred > 1 + self.tol
+        ):
             return True
-        if (alpha_ > self.tol) and (y * y_pred > 1 + self.tol):
+        if (alpha_ in NH(-self.tol, self.tol)) and (y * y_pred < 1 - self.tol):
             return True
         return False

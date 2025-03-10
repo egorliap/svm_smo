@@ -6,7 +6,7 @@ from scr.qp_solver import SMO_QPSolver
 
 
 class SVMClassifier(ClassifierMixin):
-    def __init__(self, K: Kernel = lambda x, y: np.dot(x, y), C=1.0, tol=1e-3, max_iter=5000):
+    def __init__(self, K: Kernel = lambda x, y: np.dot(x, y), C=1.0, tol=1e-3, max_iter=10000):
         self.C = C
         self.tol = tol
         self.max_iter = max_iter
@@ -27,7 +27,7 @@ class SVMClassifier(ClassifierMixin):
         self.n_samples, n_features = X.shape
         self.alpha = np.zeros(self.n_samples)
         self.b = 0
-        self.errors = np.zeros(self.n_samples)
+        self.errors = np.zeros(self.n_samples) - 1
         self.X = X
         self.y = y
         solver = SMO_QPSolver(X, y, self.K, self.C, self.tol, self.max_iter)
@@ -40,8 +40,14 @@ class SVMClassifier(ClassifierMixin):
             ans += self.y[i] * self.alpha[i] * self.K(X, self.X[i])
         ans -= self.b
         result = np.sign(ans)
-        result[result == 0] = 1 
+        result[result == 0] = -1 
         return result
+    
+    def support(self):
+        ans = 0
+        for i in range(self.n_samples):
+            ans += self.y[i] * self.alpha[i] * self.X[i]
+        return ans
     def predict(self, X=None):
         """
         Parameters

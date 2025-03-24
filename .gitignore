@@ -1,2 +1,7 @@
 .venv/
 __pycache__/
+qpproblem_smo_solver_module/
+*.egg*
+build/
+dist/
+.vscode/
